@@ -13,7 +13,7 @@ import os
 # Importar módulos do projeto
 from database import get_db, init_db
 from models import (
-    LancamentoFinanceiro, Fiel, Projeto, 
+    LancamentoFinanceiro, Fiel, Projeto,
     AtaReuniao, Configuracao
 )
 
@@ -42,7 +42,7 @@ def get_config_value(db, key, default):
             return type(default)(config.valor)
         except (ValueError, TypeError):
             return default # Retorna padrão se o valor do DB for inválido
-    
+
     # Se não existe no banco, cria com o valor padrão
     set_config_value(db, key, default)
     return default
@@ -177,7 +177,7 @@ def load_dynamic_config():
             "coordenador_local": "Maria da Silva",
             "limite_aprovacao_comunidade": 5000.00
         }
-        
+
         config = {}
         for key, default_val in defaults.items():
             db_key = key_map.get(key, key)
@@ -202,13 +202,13 @@ def salvar_lancamento(lancamento_data):
 def obter_lancamentos(mes=None, ano=None):
     with get_session() as db:
         query = db.query(LancamentoFinanceiro)
-        
+
         if mes and ano:
             query = query.filter(
                 extract('month', LancamentoFinanceiro.data) == mes,
                 extract('year', LancamentoFinanceiro.data) == ano
             )
-        
+
         return query.order_by(LancamentoFinanceiro.data.desc()).all()
 
 def calcular_dashboard_financeiro():
@@ -218,11 +218,11 @@ def calcular_dashboard_financeiro():
             func.sum(case((LancamentoFinanceiro.tipo == 'Entrada', LancamentoFinanceiro.valor), else_=0)).label('total_entradas'),
             func.sum(case((LancamentoFinanceiro.tipo == 'Saída', LancamentoFinanceiro.valor), else_=0)).label('total_saidas')
         ).one()
-        
+
         total_entradas = resultados.total_entradas or 0
         total_saidas = resultados.total_saidas or 0
         saldo_total = total_entradas - total_saidas
-        
+
         return total_entradas, saldo_total
 
 def calcular_totais_periodo(mes, ano):
@@ -235,11 +235,11 @@ def calcular_totais_periodo(mes, ano):
             extract('month', LancamentoFinanceiro.data) == mes,
             extract('year', LancamentoFinanceiro.data) == ano
         )
-        
+
         resultados = query.one()
         entradas = resultados.entradas_periodo or 0
         saidas = resultados.saidas_periodo or 0
-        
+
         return entradas, saidas
 
 # Funções para Fiéis
@@ -276,7 +276,7 @@ def obter_projetos_por_status(status=None):
 # --- FUNÇÕES DE GERAÇÃO DE PDF ---
 def gerar_relatorio_pdf(data_relatorio, dados):
     """Gera um PDF a partir dos dados do relatório."""
-    
+
     class PDF(FPDF):
         def header(self):
             self.set_font('Arial', 'B', 12)
@@ -317,8 +317,20 @@ def gerar_relatorio_pdf(data_relatorio, dados):
     pdf.set_font('Arial', '', 12)
     pdf.multi_cell(0, 10, "Este relatório foi gerado automaticamente pelo Sistema de Gestão Comunitária.")
 
-    # A codificação latin-1 é importante para o fpdf2 em alguns ambientes
-    return bytes(pdf.output(dest='S'))
+    # Garante que o conteúdo retornado seja bytes.
+    output = pdf.output(dest='S')
+    # Se `output` for str (pyfpdf costuma retornar str), encode para latin-1
+    if isinstance(output, str):
+        try:
+            return output.encode('latin-1')
+        except UnicodeEncodeError:
+            # Fallback para utf-8 se houver caracteres fora do latin-1
+            return output.encode('utf-8')
+    # Se já for bytes ou bytearray, normalize para bytes
+    if isinstance(output, (bytes, bytearray)):
+        return bytes(output)
+    # Último recurso: converter para string e então para bytes utf-8
+    return str(output).encode('utf-8')
 
 # Funções para Atas de Reunião
 def salvar_ata(ata_data):
@@ -419,26 +431,26 @@ with st.sidebar:
         build_menu_options(), # Changed to use build_menu_options()
         index=0,
         label_visibility="collapsed"
-    )    
+    )
     st.markdown("---")
-    
+
     # Informações da comunidade
     st.markdown("### ℹ️ Informações")
     st.info(f"**Coordenador:** {PARISH_INFO['coordenador_local']}")
-    
+
     # Próxima prestação de contas
     hoje = date.today()
     dia_repasses = int(PARISH_INFO['data_prestacao_contas'])
-    
+
     if hoje.day > dia_repasses:
         proximo_mes = hoje.month + 1 if hoje.month < 12 else 1
         ano = hoje.year if hoje.month < 12 else hoje.year + 1
         proxima_data = date(ano, proximo_mes, dia_repasses)
     else:
         proxima_data = date(hoje.year, hoje.month, dia_repasses)
-    
+
     dias_restantes = (proxima_data - hoje).days
-    
+
     st.markdown(f"""
     <div class="warning-card">
         <strong>⏰ Próxima prestação:</strong><br>
@@ -446,7 +458,7 @@ with st.sidebar:
         <small>({dias_restantes} dias restantes)</small>
     </div>
     """, unsafe_allow_html=True)
-    
+
     # Status do banco
     try:
         with get_session() as db:
@@ -458,10 +470,10 @@ with st.sidebar:
 # --- PÁGINA: DASHBOARD ---
 if menu == "🏠 Dashboard":
     st.title("📊 Dashboard da Comunidade")
-    
+
     # Métricas principais
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         try:
             entrada_total, saldo = calcular_dashboard_financeiro()
@@ -474,7 +486,7 @@ if menu == "🏠 Dashboard":
             """, unsafe_allow_html=True)
         except:
             st.error("Erro ao carregar dados financeiros")
-    
+
     with col2:
         try:
             total_fieis, dizimistas = contar_fieis()
@@ -487,14 +499,14 @@ if menu == "🏠 Dashboard":
             """, unsafe_allow_html=True)
         except:
             st.error("Erro ao carregar dados dos fiéis")
-    
+
     with col3:
         try:
             with get_session() as db:
                 projetos_ativos = db.query(func.count(Projeto.id)).filter(
                     Projeto.status == 'Em Andamento'
                 ).scalar() or 0
-                
+
                 st.markdown(f"""
                 <div class="metric-card">
                     <h3 style="margin:0; color: #6B7280;">Projetos Ativos</h3>
@@ -504,7 +516,7 @@ if menu == "🏠 Dashboard":
                 """, unsafe_allow_html=True)
         except:
             st.error("Erro ao carregar projetos")
-    
+
     with col4:
         try:
             with get_session() as db:
@@ -512,7 +524,7 @@ if menu == "🏠 Dashboard":
                     LancamentoFinanceiro.categoria == 'Repasse Paroquial',
                     LancamentoFinanceiro.tipo == 'Saída'
                 ).scalar() or 0
-                
+
                 st.markdown(f"""
                 <div class="metric-card">
                     <h3 style="margin:0; color: #6B7280;">Repassado à Paróquia</h3>
@@ -522,12 +534,12 @@ if menu == "🏠 Dashboard":
                 """, unsafe_allow_html=True)
         except:
             st.error("Erro ao carregar repasses")
-    
+
     st.markdown("---")
-    
+
     # Gráficos
     col_a, col_b = st.columns(2)
-    
+
     with col_a:
         st.subheader("📈 Movimentação Financeira (Últimos 6 Meses)")
         try:
@@ -535,17 +547,17 @@ if menu == "🏠 Dashboard":
                 # Obter dados dos últimos 6 meses (lógica corrigida)
                 mes_atual = hoje.month
                 ano_atual = hoje.year
-                
+
                 # Período de 6 meses (mês atual + 5 anteriores)
-                mes_inicio = mes_atual - 5 
+                mes_inicio = mes_atual - 5
                 ano_inicio = ano_atual
                 if mes_inicio <= 0:
                     mes_inicio += 12
                     ano_inicio -= 1
-                
+
                 # Define o primeiro dia do período de 6 meses
                 seis_meses_atras = date(ano_inicio, mes_inicio, 1)
-                
+
                 lancamentos = db.query(
                     extract('month', LancamentoFinanceiro.data).label('mes'),
                     extract('year', LancamentoFinanceiro.data).label('ano'),
@@ -556,25 +568,25 @@ if menu == "🏠 Dashboard":
                 ).group_by(
                     'mes', 'ano', LancamentoFinanceiro.tipo
                 ).order_by('ano', 'mes').all()
-                
+
                 if lancamentos:
                     # Preparar dados para o gráfico
                     meses = []
                     entradas = []
                     saidas = []
-                    
+
                     for lancamento in lancamentos:
                         mes_ano = f"{int(lancamento.mes)}/{int(lancamento.ano)}"
                         if mes_ano not in meses:
                             meses.append(mes_ano)
-                        
+
                         if lancamento.tipo == 'Entrada':
                             entradas.append(lancamento.total)
                             saidas.append(0)
                         else:
                             saidas.append(lancamento.total)
                             entradas.append(0)
-                    
+
                     if meses:
                         fig = go.Figure()
                         fig.add_trace(go.Bar(
@@ -589,18 +601,18 @@ if menu == "🏠 Dashboard":
                             name='Saídas',
                             marker_color='#EF4444'
                         ))
-                        
+
                         fig.update_layout(
                             barmode='group',
                             height=400,
                             showlegend=True,
                             plot_bgcolor='white'
                         )
-                        
+
                         st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
             st.info("Aguardando dados financeiros para exibir gráfico")
-    
+
     with col_b:
         st.subheader("🎯 Status dos Projetos")
         try:
@@ -609,7 +621,7 @@ if menu == "🏠 Dashboard":
                     Projeto.status,
                     func.count(Projeto.id).label('quantidade')
                 ).group_by(Projeto.status).all()
-                
+
                 if projetos_status:
                     df_status = pd.DataFrame(projetos_status, columns=['Status', 'Quantidade'])
                     fig = px.pie(
@@ -627,7 +639,7 @@ if menu == "🏠 Dashboard":
 # --- PÁGINA: FINANÇAS ---
 elif menu == "💰 Finanças":
     st.title("💰 Gestão Financeira")
-    
+
     tab1, tab2, tab3, tab4 = st.tabs([
         "💸 Novo Lançamento", "📜 Histórico", "📊 Análise", "🏦 Repasses à Paróquia"
     ])
@@ -676,10 +688,10 @@ elif menu == "💰 Finanças":
                         salvar_lancamento(lancamento_data)
                         st.success("✅ Lançamento salvo com sucesso!")
                     except Exception as e:
-                        st.error(f"❌ Erro ao salvar: {str(e)}")    
+                        st.error(f"❌ Erro ao salvar: {str(e)}")
     with tab2:
         st.subheader("Histórico de Lançamentos")
-        
+
         # Filtros
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
@@ -688,14 +700,14 @@ elif menu == "💰 Finanças":
             filtro_ano = st.selectbox("Ano", list(range(2020, hoje.year + 1)), index=len(range(2020, hoje.year + 1))-1)
         with col_f3:
             filtro_tipo = st.selectbox("Tipo", ["Todos", "Entrada", "Saída"])
-        
+
         try:
             # Obter lançamentos filtrados
             lancamentos = obter_lancamentos(filtro_mes, filtro_ano)
-            
+
             if filtro_tipo != "Todos":
                 lancamentos = [l for l in lancamentos if l.tipo == filtro_tipo]
-            
+
             if lancamentos:
                 # Converter para DataFrame
                 df_lancamentos = pd.DataFrame([{
@@ -706,13 +718,13 @@ elif menu == "💰 Finanças":
                     'Descrição': l.descricao,
                     'Aprovado': '✅' if l.aprovado else '❌'
                 } for l in lancamentos])
-                
+
                 st.dataframe(df_lancamentos, use_container_width=True, hide_index=True)
-                
+
                 # Estatísticas
                 entradas = sum(l.valor for l in lancamentos if l.tipo == 'Entrada')
                 saidas = sum(l.valor for l in lancamentos if l.tipo == 'Saída')
-                
+
                 col_e1, col_e2, col_e3 = st.columns(3)
                 col_e1.metric("Total Entradas", f"R$ {entradas:,.2f}")
                 col_e2.metric("Total Saídas", f"R$ {saidas:,.2f}")
@@ -757,7 +769,7 @@ elif menu == "💰 Finanças":
 # --- PÁGINA: FIÉIS ---
 elif menu == "👥 Fiéis":
     st.title("👥 Gestão de Fiéis")
-    
+
     tab1, tab2 = st.tabs(["📝 Cadastrar Fiel", "📊 Estatísticas"])
 
     with tab1:
@@ -809,32 +821,32 @@ elif menu == "👥 Fiéis":
                         salvar_fiel(fiel_data)
                         st.success(f"✅ {nome} cadastrado(a) com sucesso!")
                     except Exception as e:
-                        st.error(f"❌ Erro ao cadastrar: {str(e)}")    
+                        st.error(f"❌ Erro ao cadastrar: {str(e)}")
     with tab2:
         try:
             total_fieis, dizimistas = contar_fieis()
-            
+
             col1, col2, col3 = st.columns(3)
             col1.metric("Total de Fiéis", total_fieis)
             col2.metric("Dizimistas Ativos", dizimistas)
-            col3.metric("Percentual Dizimistas", 
+            col3.metric("Percentual Dizimistas",
                        f"{(dizimistas/total_fieis*100):.1f}%" if total_fieis > 0 else "0%")
-            
+
             # Sacramentos
             with get_session() as db:
                 batizados = db.query(func.count(Fiel.id)).filter(Fiel.batismo == True).scalar() or 0
                 eucaristia_count = db.query(func.count(Fiel.id)).filter(Fiel.eucaristia == True).scalar() or 0
                 crismados = db.query(func.count(Fiel.id)).filter(Fiel.crisma == True).scalar() or 0
                 casados = db.query(func.count(Fiel.id)).filter(Fiel.matrimonio == True).scalar() or 0
-                
+
                 fig = go.Figure(data=[
-                    go.Bar(name='Sacramentos', 
+                    go.Bar(name='Sacramentos',
                           x=['Batismo', 'Eucaristia', 'Crisma', 'Matrimônio'],
                           y=[batizados, eucaristia_count, crismados, casados])
                 ])
                 fig.update_layout(title="Sacramentos Recebidos", height=400)
                 st.plotly_chart(fig, use_container_width=True)
-                
+
         except Exception as e:
             st.error(f"Erro ao carregar estatísticas: {str(e)}")
 
@@ -842,14 +854,14 @@ elif menu == "👥 Fiéis":
 # --- PÁGINA: PROJETOS ---
 elif menu == "🏗️ Projetos":
     st.title("🏗️ Projetos da Comunidade")
-    
+
     st.markdown(f"""
     <div class="warning-card">
-        <strong>⚠️ Atenção:</strong> Projetos acima de R$ {PARISH_INFO['limite_aprovacao_comunidade']:,.2f} 
+        <strong>⚠️ Atenção:</strong> Projetos acima de R$ {PARISH_INFO['limite_aprovacao_comunidade']:,.2f}
         precisam de aprovação prévia da paróquia.
     </div>
     """, unsafe_allow_html=True)
-    
+
     tab1, tab2 = st.tabs(["📋 Novo Projeto", "📊 Acompanhamento"])
 
     # ----------------------------------------
@@ -1026,14 +1038,14 @@ elif menu == "📝 Atas de Reunião":
                     with st.expander(f"**{ata.data_reuniao.strftime('%d/%m/%Y')}** - {ata.tipo}"):
                         st.markdown(f"#### Participantes")
                         st.text(ata.participantes)
-                        
+
                         st.markdown(f"#### Decisões Tomadas")
                         st.text(ata.decisoes)
 
                         st.markdown(f"#### Ações e Responsáveis")
                         st.text(f"Ações: {ata.acoes}")
                         st.text(f"Responsáveis: {ata.responsaveis}")
-                        
+
                         st.caption(f"Registrado em: {ata.created_at.strftime('%d/%m/%Y %H:%M') if ata.created_at else 'N/A'}")
 
             else:
@@ -1044,26 +1056,26 @@ elif menu == "📝 Atas de Reunião":
 # --- PÁGINA: RELATÓRIOS ---
 elif menu == "📊 Relatórios":
     st.title("📊 Relatórios para Paróquia")
-    
+
     st.markdown(f"""
     <div class="warning-card">
-        <strong>📅 Próximo envio:</strong> {proxima_data.strftime('%d/%m/%Y')} 
+        <strong>📅 Próximo envio:</strong> {proxima_data.strftime('%d/%m/%Y')}
         (em {dias_restantes} dias)<br>
         <strong>📧 Enviar para:</strong> {PARISH_INFO['email']}
     </div>
     """, unsafe_allow_html=True)
-    
+
     col1, col2 = st.columns(2)
     with col1:
         # Padrão para o mês anterior
         default_month_index = hoje.month - 2 if hoje.month > 1 else 11
-        mes_relatorio = st.selectbox("Selecione o mês do relatório", 
+        mes_relatorio = st.selectbox("Selecione o mês do relatório",
             list(range(1, 13)), format_func=lambda x: calendar.month_name[x], index=default_month_index)
     with col2:
         default_year_index = len(range(2020, hoje.year + 1)) - (1 if hoje.month > 1 else 2)
-        ano_relatorio = st.selectbox("Ano", 
+        ano_relatorio = st.selectbox("Ano",
             list(range(2020, hoje.year + 1)), index=default_year_index)
-    
+
     if st.button("📄 Gerar Prévia do Relatório", type="primary"):
         try:
             # Coletar dados para o relatório
@@ -1073,7 +1085,7 @@ elif menu == "📊 Relatórios":
                     extract('month', Fiel.data_cadastro) == mes_relatorio,
                     extract('year', Fiel.data_cadastro) == ano_relatorio
                 ).scalar() or 0
-                
+
                 projetos_novos = db.query(func.count(Projeto.id)).filter(
                     extract('month', Projeto.created_at) == mes_relatorio,
                     extract('year', Projeto.created_at) == ano_relatorio
@@ -1099,23 +1111,23 @@ elif menu == "📊 Relatórios":
     # Exibe a prévia e o botão de download se os dados foram gerados
     if 'dados_relatorio' in st.session_state:
         dados = st.session_state['dados_relatorio']
-        
+
         st.markdown("---")
         st.success("✅ Prévia do relatório gerada. Verifique os dados abaixo e baixe o PDF.")
-        
+
         col_a, col_b = st.columns(2)
         with col_a:
             st.subheader("📈 Resumo Financeiro")
             st.write(f"**Total de Entradas:** R$ {dados['entradas_mes']:,.2f}")
             st.write(f"**Total de Saídas:** R$ {dados['saidas_mes']:,.2f}")
             st.write(f"**Saldo do Mês:** R$ {dados['saldo_mes']:,.2f}")
-        
+
         with col_b:
             st.subheader("📋 Atividades da Comunidade")
             st.write(f"**Novos fiéis cadastrados:** {dados['novos_fieis']}")
             st.write(f"**Projetos iniciados:** {dados['novos_projetos']}")
             st.write(f"**Reuniões realizadas:** (Funcionalidade pendente)")
-        
+
         # Gera o PDF em bytes e oferece para download
         pdf_bytes = gerar_relatorio_pdf(st.session_state['periodo_relatorio'].replace("_", "/"), dados)
         st.download_button(
@@ -1131,7 +1143,7 @@ elif menu == "⚙️ Configurações":
         st.error("Acesso negado. Apenas administradores podem acessar Configurações.")
         st.stop() # Stop rendering the page for unauthorized users
     st.title("⚙️ Configurações do Sistema")
-    
+
     tab1, tab2, tab3 = st.tabs(["🏛️ Paróquia", "🔐 Segurança", "🗄️ Banco de Dados"])
 
     with tab1:
@@ -1174,31 +1186,31 @@ elif menu == "⚙️ Configurações":
                         st.rerun()
 
                     except Exception as e:
-                        st.error(f"❌ Erro ao salvar configurações: {e}")    
+                        st.error(f"❌ Erro ao salvar configurações: {e}")
     with tab3:
         st.subheader("Status do Banco de Dados")
-        
+
         try:
             with get_session() as db:
                 # Estatísticas
                 total_lancamentos = db.query(func.count(LancamentoFinanceiro.id)).scalar()
                 total_fieis = db.query(func.count(Fiel.id)).scalar()
                 total_projetos = db.query(func.count(Projeto.id)).scalar()
-                
+
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Lançamentos", total_lancamentos)
                 col2.metric("Fiéis", total_fieis)
                 col3.metric("Projetos", total_projetos)
-                
+
                 # Backup
                 st.subheader("🗃️ Backup de Dados")
-                
+
                 if st.button("📥 Exportar Backup CSV"):
                     # Exportar dados para CSV
                     lancamentos = db.query(LancamentoFinanceiro).all()
                     fieis = db.query(Fiel).all()
                     projetos = db.query(Projeto).all()
-                    
+
                     # Criar DataFrames
                     df_lancamentos = pd.DataFrame([{
                         'id': l.id,
@@ -1208,16 +1220,16 @@ elif menu == "⚙️ Configurações":
                         'valor': l.valor,
                         'descricao': l.descricao
                     } for l in lancamentos])
-                    
+
                     st.download_button(
                         label="📥 Baixar Lançamentos",
                         data=df_lancamentos.to_csv(index=False),
                         file_name=f"backup_lancamentos_{hoje.strftime('%Y%m%d')}.csv",
                         mime="text/csv"
                     )
-                    
+
                 st.info("✅ Banco de dados conectado com sucesso!")
-                
+
         except Exception as e:
             st.error(f"❌ Erro na conexão com o banco: {str(e)}")
 
