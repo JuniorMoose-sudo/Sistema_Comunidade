@@ -4,18 +4,31 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
 import calendar
-from fpdf import FPDF
-from sqlalchemy.orm import Session
+from io import BytesIO
 from sqlalchemy import func, extract, case
-from werkzeug.security import generate_password_hash, check_password_hash
-import os
 
 # Importar módulos do projeto
-from database import get_db, init_db
+from database import init_db, get_session
 from models import (
-    LancamentoFinanceiro, Fiel, Projeto,
-    AtaReuniao, Configuracao
+    LancamentoFinanceiro,
+    Fiel,
+    Projeto,
+    AtaReuniao,
+    Configuracao,
 )
+from auth import require_login, can_write
+from services.financeiro import (
+    salvar_lancamento,
+    obter_lancamentos,
+    calcular_dashboard_financeiro,
+    calcular_totais_periodo,
+)
+from services.fieis import salvar_fiel, contar_fieis
+from services.projetos import salvar_projeto, obter_projetos_por_status
+from services.atas import salvar_ata, obter_atas, obter_atas_por_periodo
+from utils.pdf import gerar_relatorio_pdf
+from utils.config import load_dynamic_config, set_config_value
+from components.ui import render_header, render_metric_card
 
 # --- CONFIGURAÇÃO INICIAL ---
 st.set_page_config(
@@ -25,338 +38,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Inicializar banco de dados
+# Inicializar banco de dados e autenticação
 init_db()
-
-# --- FUNÇÕES DE BANCO DE DADOS ---
-def get_session():
-    """Obter sessão do banco de dados"""
-    return next(get_db())
-
-def get_config_value(db, key, default):
-    """Obtém um valor de configuração do banco. Retorna o padrão se não encontrado."""
-    config = db.query(Configuracao).filter(Configuracao.chave == key).first()
-    if config is not None:
-        try:
-            # Converte o valor do DB para o tipo do valor padrão
-            return type(default)(config.valor)
-        except (ValueError, TypeError):
-            return default # Retorna padrão se o valor do DB for inválido
-
-    # Se não existe no banco, cria com o valor padrão
-    set_config_value(db, key, default)
-    return default
-
-def set_config_value(db, key, value):
-    """Define um valor de configuração no banco."""
-    config = db.query(Configuracao).filter(Configuracao.chave == key).first()
-    if config:
-        config.valor = str(value)
-    else:
-        config = Configuracao(chave=key, valor=str(value))
-        db.add(config)
-    db.commit()
-
-# --- FUNÇÕES DE AUTENTICAÇÃO ---
-# Flag para verificar se werkzeug.security está disponível
-USE_WERKZEUG = True
-
-def _maybe_hash(pwd: str) -> str:
-    """Hash da senha se werkzeug estiver disponível, senão retorna texto puro."""
-    if USE_WERKZEUG:
-        return generate_password_hash(pwd)
-    return pwd
-
-def _maybe_check_hash(stored: str, provided: str) -> bool:
-    if USE_WERKZEUG:
-        return check_password_hash(stored, provided)
-    return stored == provided
-
-def init_auth_defaults():
-    """
-    Cria credenciais padrão na tabela Configuracao caso não existam.
-    Chame isso logo após init_db().
-    Padrões: admin/admin123 e usuario/user123 (troque em produção).
-    As senhas serão armazenadas em texto (se werkzeug ausente) ou em hash.
-    """
-    with get_session() as db:
-        # usuário admin
-        if not db.query(Configuracao).filter(Configuracao.chave == "auth_admin_user").first():
-            set_config_value(db, "auth_admin_user", "admin")
-        if not db.query(Configuracao).filter(Configuracao.chave == "auth_admin_pass").first():
-            raw = "admin123"
-            set_config_value(db, "auth_admin_pass", _maybe_hash(raw))
-        # usuário comum
-        if not db.query(Configuracao).filter(Configuracao.chave == "auth_user_user").first():
-            set_config_value(db, "auth_user_user", "usuario")
-        if not db.query(Configuracao).filter(Configuracao.chave == "auth_user_pass").first():
-            raw = "user123"
-            set_config_value(db, "auth_user_pass", _maybe_hash(raw))
-
-def authenticate(username: str, password: str):
-    """
-    Autentica contra os valores em Configuracao.
-    Retorna dict {"role": "admin"/"usuario", "name": username} ou None.
-    """
-    with get_session() as db:
-        admin_u = get_config_value(db, "auth_admin_user", "admin")
-        admin_p_hashed = get_config_value(db, "auth_admin_pass", _maybe_hash("admin123"))
-        user_u = get_config_value(db, "auth_user_user", "usuario")
-        user_p_hashed = get_config_value(db, "auth_user_pass", _maybe_hash("user123"))
-
-        # checar admin
-        if username == admin_u:
-            if _maybe_check_hash(admin_p_hashed, password):
-                return {"role": "admin", "name": username}
-        # checar usuario comum
-        if username == user_u:
-            if _maybe_check_hash(user_p_hashed, password):
-                return {"role": "usuario", "name": username}
-    return None
-
-def show_login():
-    """
-    Exibe a tela de login (form).
-    Ao autenticar com sucesso, grava em st.session_state['auth'] e faz st.rerun().
-    """
-    st.set_page_config(page_title="Login")
-    st.title("🔐 Acesso ao Sistema")
-    st.info("Entre com suas credenciais")
-
-    with st.form("login_form"):
-        username = st.text_input("Usuário")
-        password = st.text_input("Senha", type="password")
-        submitted = st.form_submit_button("Entrar")
-        if submitted:
-            user = authenticate(username.strip(), password)
-            if user:
-                st.session_state["auth"] = user
-                st.success(f"Bem-vindo, {user['name']}!")
-                # rerun para recarregar a app com sessão autenticada
-                st.rerun()
-            else:
-                st.error("Credenciais inválidas")
-
-def require_login():
-    """
-    Interrompe a execução (st.stop) e exibe login se não estiver autenticado.
-    Deve ser chamado logo após init_db() e init_auth_defaults().
-    """
-    if "auth" not in st.session_state or st.session_state.get("auth") is None:
-        show_login()
-        st.stop()
-
-def can_write() -> bool:
-    """Retorna True se o usuário logado for admin (pode mudar dados)."""
-    return st.session_state.get("auth", {}).get("role") == "admin"
-
-init_auth_defaults() # Adicionado para criar usuários padrão
-require_login()      # Adicionado para forçar o login
-
+require_login()  # Força o login
 
 # --- CONSTANTES E CONFIGURAÇÕES ---
-# Carrega as configurações do banco de dados dinamicamente.
-def load_dynamic_config():
-    with get_session() as db:
-        # Mapeamento para manter as chaves originais do PARISH_INFO no código
-        key_map = {
-            "nome": "nome_paroquia",
-            "responsavel": "responsavel_paroquia",
-            "telefone": "telefone_paroquia",
-            "email": "email_paroquia",
-            "data_prestacao_contas": "data_prestacao_contas",
-            "coordenador_local": "coordenador_local",
-            "limite_aprovacao_comunidade": "limite_aprovacao_comunidade"
-        }
-        defaults = {
-            "nome": "Paróquia São José",
-            "responsavel": "Pe. João da Silva",
-            "telefone": "(11) 3333-3333",
-            "email": "secretaria@paroquiasaojose.org.br",
-            "data_prestacao_contas": "05",
-            "coordenador_local": "Maria da Silva",
-            "limite_aprovacao_comunidade": 5000.00
-        }
-
-        config = {}
-        for key, default_val in defaults.items():
-            db_key = key_map.get(key, key)
-            config[key] = get_config_value(db, db_key, default_val)
-        return config
-
 PARISH_INFO = load_dynamic_config()
 
 
 # Função para login/logout
 
 
-# Funções para Lancamentos Financeiros
-def salvar_lancamento(lancamento_data):
-    with get_session() as db:
-        lancamento = LancamentoFinanceiro(**lancamento_data)
-        db.add(lancamento)
-        db.commit()
-        db.refresh(lancamento)
-    return lancamento
+# Funções para lançamentos financeiros foram extraídas para services.financeiro
 
-def obter_lancamentos(mes=None, ano=None):
-    with get_session() as db:
-        query = db.query(LancamentoFinanceiro)
-
-        if mes and ano:
-            query = query.filter(
-                extract('month', LancamentoFinanceiro.data) == mes,
-                extract('year', LancamentoFinanceiro.data) == ano
-            )
-
-        return query.order_by(LancamentoFinanceiro.data.desc()).all()
-
-def calcular_dashboard_financeiro():
-    """Calcula os totais de entrada e o saldo geral em uma única consulta otimizada para o dashboard."""
-    with get_session() as db:
-        resultados = db.query(
-            func.sum(case((LancamentoFinanceiro.tipo == 'Entrada', LancamentoFinanceiro.valor), else_=0)).label('total_entradas'),
-            func.sum(case((LancamentoFinanceiro.tipo == 'Saída', LancamentoFinanceiro.valor), else_=0)).label('total_saidas')
-        ).one()
-
-        total_entradas = resultados.total_entradas or 0
-        total_saidas = resultados.total_saidas or 0
-        saldo_total = total_entradas - total_saidas
-
-        return total_entradas, saldo_total
-
-def calcular_totais_periodo(mes, ano):
-    """Calcula os totais de entrada e saída para um período específico (usado em Relatórios)."""
-    with get_session() as db:
-        query = db.query(
-            func.sum(case((LancamentoFinanceiro.tipo == 'Entrada', LancamentoFinanceiro.valor), else_=0)).label('entradas_periodo'),
-            func.sum(case((LancamentoFinanceiro.tipo == 'Saída', LancamentoFinanceiro.valor), else_=0)).label('saidas_periodo')
-        ).filter(
-            extract('month', LancamentoFinanceiro.data) == mes,
-            extract('year', LancamentoFinanceiro.data) == ano
-        )
-
-        resultados = query.one()
-        entradas = resultados.entradas_periodo or 0
-        saidas = resultados.saidas_periodo or 0
-
-        return entradas, saidas
-
-# Funções para Fiéis
-def salvar_fiel(fiel_data):
-    with get_session() as db:
-        fiel = Fiel(**fiel_data)
-        db.add(fiel)
-        db.commit()
-        db.refresh(fiel)
-    return fiel
-
-def contar_fieis():
-    with get_session() as db:
-        total = db.query(func.count(Fiel.id)).scalar()
-        dizimistas = db.query(func.count(Fiel.id)).filter(Fiel.dizimista == True).scalar()
-        return total, dizimistas
-
-# Funções para Projetos
-def salvar_projeto(projeto_data):
-    with get_session() as db:
-        projeto = Projeto(**projeto_data)
-        db.add(projeto)
-        db.commit()
-        db.refresh(projeto)
-    return projeto
-
-def obter_projetos_por_status(status=None):
-    with get_session() as db:
-        query = db.query(Projeto)
-        if status:
-            query = query.filter(Projeto.status == status)
-        return query.order_by(Projeto.prioridade.desc()).all()
-
-# --- FUNÇÕES DE GERAÇÃO DE PDF ---
-def gerar_relatorio_pdf(data_relatorio, dados):
-    """Gera um PDF a partir dos dados do relatório."""
-
-    class PDF(FPDF):
-        def header(self):
-            self.set_font('Arial', 'B', 12)
-            self.cell(0, 10, f"Relatório da Comunidade - {dados['nome_comunidade']}", ln=1, align='C')
-            self.set_font('Arial', '', 10)
-            self.cell(0, 5, f"Período de Referência: {data_relatorio}", ln=1, align='C')
-            self.ln(10)
-
-        def footer(self):
-            self.set_y(-15)
-            self.set_font('Arial', 'I', 8)
-            self.cell(0, 10, f'Página {self.page_no()}', align='C')
-
-    pdf = PDF()
-    pdf.add_page()
-
-    # Seção 1: Resumo Financeiro
-    pdf.set_font('Arial', 'B', 14)
-    pdf.cell(0, 10, '1. Resumo Financeiro', ln=1)
-    pdf.set_font('Arial', '', 12)
-    pdf.cell(0, 8, f"  - Total de Entradas: R$ {dados['entradas_mes']:,.2f}", ln=1)
-    pdf.cell(0, 8, f"  - Total de Saídas: R$ {dados['saidas_mes']:,.2f}", ln=1)
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 8, f"  - Saldo do Mês: R$ {dados['saldo_mes']:,.2f}", ln=1)
-    pdf.ln(10)
-
-    # Seção 2: Atividades da Comunidade
-    pdf.set_font('Arial', 'B', 14)
-    pdf.cell(0, 10, '2. Atividades da Comunidade', ln=1)
-    pdf.set_font('Arial', '', 12)
-    pdf.cell(0, 8, f"  - Novos fiéis cadastrados no mês: {dados['novos_fieis']}", ln=1)
-    pdf.cell(0, 8, f"  - Novos projetos iniciados no mês: {dados['novos_projetos']}", ln=1)
-    pdf.ln(10)
-
-    # Seção 3: Observações
-    pdf.set_font('Arial', 'B', 14)
-    pdf.cell(0, 10, '3. Observações', ln=1)
-    pdf.set_font('Arial', '', 12)
-    pdf.multi_cell(0, 10, "Este relatório foi gerado automaticamente pelo Sistema de Gestão Comunitária.")
-
-    # Garante que o conteúdo retornado seja bytes.
-    output = pdf.output(dest='S')
-    # Se `output` for str (pyfpdf costuma retornar str), encode para latin-1
-    if isinstance(output, str):
-        try:
-            return output.encode('latin-1')
-        except UnicodeEncodeError:
-            # Fallback para utf-8 se houver caracteres fora do latin-1
-            return output.encode('utf-8')
-    # Se já for bytes ou bytearray, normalize para bytes
-    if isinstance(output, (bytes, bytearray)):
-        return bytes(output)
-    # Último recurso: converter para string e então para bytes utf-8
-    return str(output).encode('utf-8')
-
-# Funções para Atas de Reunião
-def salvar_ata(ata_data):
-    """Salva uma nova ata de reunião no banco de dados."""
-    with get_session() as db:
-        ata = AtaReuniao(**ata_data)
-        db.add(ata)
-        db.commit()
-        db.refresh(ata)
-    return ata
-
-def obter_atas():
-    """Obtém todas as atas de reunião ordenadas por data."""
-    with get_session() as db:
-        return db.query(AtaReuniao).order_by(AtaReuniao.data_reuniao.desc()).all()
-
-def obter_atas_por_periodo(mes=None, ano=None):
-    """Obtém as atas de reunião para um período específico, ordenadas por data."""
-    with get_session() as db:
-        query = db.query(AtaReuniao)
-        if mes and ano:
-            query = query.filter(
-                extract('month', AtaReuniao.data_reuniao) == mes,
-                extract('year', AtaReuniao.data_reuniao) == ano
-            )
-        return query.order_by(AtaReuniao.data_reuniao.desc()).all()
+# Funções de fiéis, projetos, atas e PDF foram extraídas para services/ e utils/pdf.py
 
 def render_sidebar_userinfo():
     """Colocar isso dentro do with st.sidebar: do seu layout."""
@@ -412,13 +107,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CABEÇALHO ---
-st.markdown(f"""
-<div class="community-header">
-    <h1 style="margin:0; font-size: 2.5rem;">⛪ Comunidade Jesus de Názare</h1>
-    <p style="margin:0; opacity:0.9; font-size: 1.1rem;">📞 (83) 99999-9999 | 📍 Rua da Comunidade, 123</p>
-    <p style="margin:0; opacity:0.9; font-size: 1rem;">🏛️ {PARISH_INFO['nome']} | Diocese de Campina Grande</p>
-</div>
-""", unsafe_allow_html=True)
+render_header(PARISH_INFO)
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -477,62 +166,66 @@ if menu == "🏠 Dashboard":
     with col1:
         try:
             entrada_total, saldo = calcular_dashboard_financeiro()
-            st.markdown(f"""
-            <div class="metric-card">
-                <h3 style="margin:0; color: #6B7280;">Saldo Total</h3>
-                <h1 style="margin:0; color: {'#10B981' if saldo >= 0 else '#EF4444'};">R$ {saldo:,.2f}</h1>
-                <small>Total de Entradas: R$ {entrada_total:,.2f}</small>
-            </div>
-            """, unsafe_allow_html=True)
-        except:
+            render_metric_card(
+                "Saldo Total",
+                f"R$ {saldo:,.2f}",
+                subtitle=f"Total de Entradas: R$ {entrada_total:,.2f}",
+                color="#10B981" if saldo >= 0 else "#EF4444",
+            )
+        except Exception:
             st.error("Erro ao carregar dados financeiros")
 
     with col2:
         try:
             total_fieis, dizimistas = contar_fieis()
-            st.markdown(f"""
-            <div class="metric-card">
-                <h3 style="margin:0; color: #6B7280;">Fiéis</h3>
-                <h1 style="margin:0; color: #3B82F6;">{total_fieis}</h1>
-                <small>{dizimistas} dizimistas ativos</small>
-            </div>
-            """, unsafe_allow_html=True)
-        except:
+            render_metric_card(
+                "Fiéis",
+                f"{total_fieis}",
+                subtitle=f"{dizimistas} dizimistas ativos",
+                color="#3B82F6",
+            )
+        except Exception:
             st.error("Erro ao carregar dados dos fiéis")
 
     with col3:
         try:
             with get_session() as db:
-                projetos_ativos = db.query(func.count(Projeto.id)).filter(
-                    Projeto.status == 'Em Andamento'
-                ).scalar() or 0
+                projetos_ativos = (
+                    db.query(func.count(Projeto.id))
+                    .filter(Projeto.status == "Em Andamento")
+                    .scalar()
+                    or 0
+                )
 
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3 style="margin:0; color: #6B7280;">Projetos Ativos</h3>
-                    <h1 style="margin:0; color: #F59E0B;">{projetos_ativos}</h1>
-                    <small>Em execução</small>
-                </div>
-                """, unsafe_allow_html=True)
-        except:
+            render_metric_card(
+                "Projetos Ativos",
+                f"{projetos_ativos}",
+                subtitle="Em execução",
+                color="#F59E0B",
+            )
+        except Exception:
             st.error("Erro ao carregar projetos")
 
     with col4:
         try:
             with get_session() as db:
-                total_repasses = db.query(func.sum(LancamentoFinanceiro.valor)).filter(
-                    LancamentoFinanceiro.categoria == 'Repasse Paroquial',
-                    LancamentoFinanceiro.tipo == 'Saída'
-                ).scalar() or 0
+                total_repasses = (
+                    db.query(func.sum(LancamentoFinanceiro.valor))
+                    .filter(
+                        LancamentoFinanceiro.categoria == "Repasse Paroquial",
+                        LancamentoFinanceiro.tipo == "Saída",
+                    )
+                    .scalar()
+                    or 0
+                )
 
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3 style="margin:0; color: #6B7280;">Repassado à Paróquia</h3>
-                    <h1 style="margin:0; color: #8B5CF6;">R$ {total_repasses:,.2f}</h1>
-                    <small>Total histórico</small>
-                </div>
-                """, unsafe_allow_html=True)
-        except:
+            render_metric_card(
+                "Repassado à Paróquia",
+                f"R$ {total_repasses:,.2f}",
+                subtitle="Total histórico",
+                color="#8B5CF6",
+            )
+        except Exception:
             st.error("Erro ao carregar repasses")
 
     st.markdown("---")
@@ -832,18 +525,37 @@ elif menu == "👥 Fiéis":
             col3.metric("Percentual Dizimistas",
                        f"{(dizimistas/total_fieis*100):.1f}%" if total_fieis > 0 else "0%")
 
-            # Sacramentos
+            # Sacramentos - consulta agregada única
             with get_session() as db:
-                batizados = db.query(func.count(Fiel.id)).filter(Fiel.batismo == True).scalar() or 0
-                eucaristia_count = db.query(func.count(Fiel.id)).filter(Fiel.eucaristia == True).scalar() or 0
-                crismados = db.query(func.count(Fiel.id)).filter(Fiel.crisma == True).scalar() or 0
-                casados = db.query(func.count(Fiel.id)).filter(Fiel.matrimonio == True).scalar() or 0
+                resultado = db.query(
+                    func.sum(
+                        case((Fiel.batismo.is_(True), 1), else_=0)
+                    ).label("batizados"),
+                    func.sum(
+                        case((Fiel.eucaristia.is_(True), 1), else_=0)
+                    ).label("eucaristia_count"),
+                    func.sum(
+                        case((Fiel.crisma.is_(True), 1), else_=0)
+                    ).label("crismados"),
+                    func.sum(
+                        case((Fiel.matrimonio.is_(True), 1), else_=0)
+                    ).label("casados"),
+                ).one()
 
-                fig = go.Figure(data=[
-                    go.Bar(name='Sacramentos',
-                          x=['Batismo', 'Eucaristia', 'Crisma', 'Matrimônio'],
-                          y=[batizados, eucaristia_count, crismados, casados])
-                ])
+                batizados = resultado.batizados or 0
+                eucaristia_count = resultado.eucaristia_count or 0
+                crismados = resultado.crismados or 0
+                casados = resultado.casados or 0
+
+                fig = go.Figure(
+                    data=[
+                        go.Bar(
+                            name="Sacramentos",
+                            x=["Batismo", "Eucaristia", "Crisma", "Matrimônio"],
+                            y=[batizados, eucaristia_count, crismados, casados],
+                        )
+                    ]
+                )
                 fig.update_layout(title="Sacramentos Recebidos", height=400)
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -1091,6 +803,11 @@ elif menu == "📊 Relatórios":
                     extract('year', Projeto.created_at) == ano_relatorio
                 ).scalar() or 0
 
+                reunioes_realizadas = db.query(func.count(AtaReuniao.id)).filter(
+                    extract('month', AtaReuniao.data_reuniao) == mes_relatorio,
+                    extract('year', AtaReuniao.data_reuniao) == ano_relatorio
+                ).scalar() or 0
+
             # Organizar dados em um dicionário
             dados_relatorio = {
                 "nome_comunidade": "Nossa Senhora das Graças",
@@ -1099,6 +816,7 @@ elif menu == "📊 Relatórios":
                 "saldo_mes": entradas_mes - saidas_mes,
                 "novos_fieis": novos_fieis_mes,
                 "novos_projetos": projetos_novos,
+                "reunioes_realizadas": reunioes_realizadas,
             }
 
             st.session_state['dados_relatorio'] = dados_relatorio
@@ -1126,7 +844,7 @@ elif menu == "📊 Relatórios":
             st.subheader("📋 Atividades da Comunidade")
             st.write(f"**Novos fiéis cadastrados:** {dados['novos_fieis']}")
             st.write(f"**Projetos iniciados:** {dados['novos_projetos']}")
-            st.write(f"**Reuniões realizadas:** (Funcionalidade pendente)")
+            st.write(f"**Reuniões realizadas:** {dados['reunioes_realizadas']}")
 
         # Gera o PDF em bytes e oferece para download
         pdf_bytes = gerar_relatorio_pdf(st.session_state['periodo_relatorio'].replace("_", "/"), dados)
@@ -1206,26 +924,101 @@ elif menu == "⚙️ Configurações":
                 st.subheader("🗃️ Backup de Dados")
 
                 if st.button("📥 Exportar Backup CSV"):
-                    # Exportar dados para CSV
+                    # Exportar dados para CSV (apenas lançamentos, como antes)
+                    lancamentos = db.query(LancamentoFinanceiro).all()
+
+                    df_lancamentos = pd.DataFrame(
+                        [
+                            {
+                                "id": l.id,
+                                "data": l.data,
+                                "categoria": l.categoria,
+                                "tipo": l.tipo,
+                                "valor": l.valor,
+                                "descricao": l.descricao,
+                            }
+                            for l in lancamentos
+                        ]
+                    )
+
+                    st.download_button(
+                        label="📥 Baixar Lançamentos (CSV)",
+                        data=df_lancamentos.to_csv(index=False),
+                        file_name=f"backup_lancamentos_{hoje.strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                    )
+
+                # Exportação completa para Excel (finanças, fiéis, projetos)
+                if st.button("📊 Exportar Dados para Excel"):
                     lancamentos = db.query(LancamentoFinanceiro).all()
                     fieis = db.query(Fiel).all()
                     projetos = db.query(Projeto).all()
 
-                    # Criar DataFrames
-                    df_lancamentos = pd.DataFrame([{
-                        'id': l.id,
-                        'data': l.data,
-                        'categoria': l.categoria,
-                        'tipo': l.tipo,
-                        'valor': l.valor,
-                        'descricao': l.descricao
-                    } for l in lancamentos])
+                    df_lancamentos = pd.DataFrame(
+                        [
+                            {
+                                "id": l.id,
+                                "data": l.data,
+                                "categoria": l.categoria,
+                                "tipo": l.tipo,
+                                "valor": l.valor,
+                                "descricao": l.descricao,
+                                "aprovado": l.aprovado,
+                            }
+                            for l in lancamentos
+                        ]
+                    )
+
+                    df_fieis = pd.DataFrame(
+                        [
+                            {
+                                "id": f.id,
+                                "nome": f.nome,
+                                "telefone": f.telefone,
+                                "email": f.email,
+                                "endereco": f.endereco,
+                                "familia": f.familia,
+                                "dizimista": f.dizimista,
+                                "data_cadastro": f.data_cadastro,
+                                "ativo": f.ativo,
+                            }
+                            for f in fieis
+                        ]
+                    )
+
+                    df_projetos = pd.DataFrame(
+                        [
+                            {
+                                "id": p.id,
+                                "nome": p.nome,
+                                "tipo": p.tipo,
+                                "status": p.status,
+                                "prioridade": p.prioridade,
+                                "custo_estimado": p.custo_estimado,
+                                "custo_real": p.custo_real,
+                                "prazo": p.prazo,
+                                "data_inicio": p.data_inicio,
+                                "data_conclusao": p.data_conclusao,
+                            }
+                            for p in projetos
+                        ]
+                    )
+
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df_lancamentos.to_excel(
+                            writer, index=False, sheet_name="Lancamentos"
+                        )
+                        df_fieis.to_excel(writer, index=False, sheet_name="Fieis")
+                        df_projetos.to_excel(writer, index=False, sheet_name="Projetos")
+
+                    output.seek(0)
 
                     st.download_button(
-                        label="📥 Baixar Lançamentos",
-                        data=df_lancamentos.to_csv(index=False),
-                        file_name=f"backup_lancamentos_{hoje.strftime('%Y%m%d')}.csv",
-                        mime="text/csv"
+                        label="📥 Baixar Backup Completo (Excel)",
+                        data=output.getvalue(),
+                        file_name=f"backup_completo_{hoje.strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
 
                 st.info("✅ Banco de dados conectado com sucesso!")

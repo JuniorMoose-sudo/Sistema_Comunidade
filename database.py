@@ -3,6 +3,7 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
+from contextlib import contextmanager
 
 # A URL de conexão é lida dos segredos do Streamlit para segurança no deploy.
 # Para desenvolvimento local, o Streamlit também lerá o .streamlit/secrets.toml
@@ -28,6 +29,18 @@ Base = declarative_base()
 def get_db():
     """Dependency para obter sessão do banco"""
     db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@contextmanager
+def get_session():
+    """
+    Context manager para obter uma sessão do banco de dados
+    a partir de get_db(), garantindo o fechamento correto.
+    """
+    db = next(get_db())
     try:
         yield db
     finally:
