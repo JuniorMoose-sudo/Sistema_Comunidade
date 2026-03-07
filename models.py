@@ -6,9 +6,9 @@ class LancamentoFinanceiro(Base):
     __tablename__ = "lancamentos_financeiros"
     
     id = Column(Integer, primary_key=True, index=True)
-    data = Column(Date, nullable=False)
+    data = Column(Date, nullable=False, index=True)
     categoria = Column(String(100), nullable=False)
-    tipo = Column(String(20), nullable=False)  # 'Entrada' ou 'Saída'
+    tipo = Column(String(20), nullable=False, index=True)  # 'Entrada' ou 'Saída'
     valor = Column(Float, nullable=False)
     descricao = Column(Text)
     comprovante = Column(String(255))
@@ -38,7 +38,7 @@ class Fiel(Base):
     data_matrimonio = Column(Date)
     
     # Envolvimento
-    dizimista = Column(Boolean, default=False)
+    dizimista = Column(Boolean, default=False, index=True)
     ministrios = Column(Text)  # JSON ou lista separada por vírgula
     comunidade_id = Column(Integer, default=1)
     data_cadastro = Column(Date, server_default=func.now())
@@ -56,7 +56,7 @@ class Projeto(Base):
     custo_real = Column(Float, default=0.0)
     prazo = Column(Date)
     prioridade = Column(String(20))  # 'Baixa', 'Média', 'Alta', 'Urgente'
-    status = Column(String(20))  # 'Planejamento', 'Em Andamento', 'Concluído', 'Cancelado'
+    status = Column(String(20), index=True)  # 'Planejamento', 'Em Andamento', 'Concluído', 'Cancelado'
     aprovado_paroquia = Column(Boolean, default=False)
     data_inicio = Column(Date)
     data_conclusao = Column(Date)

@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+*.sqlite3
+*.db
+
+.env
+.env.*
+!*.env.example
+
+.venv/
+venv/
+ENV/
+
+.idea/
+.vscode/
+.cursor/
+
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/credentials.toml
+.streamlit/config.toml.local
+.streamlit/secrets.toml.local
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
